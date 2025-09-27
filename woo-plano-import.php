@@ -466,6 +466,141 @@ class Plano_Importer_Core {
         update_option('plano_import_offset', 0, false);
         $this->log('Pointer reset to 0 via reset_pointer()');
     }
+
+    /**
+     * Return path for persistent hash file in uploads dir.
+     */
+    private function get_hash_file_path(): string
+    {
+        return trailingslashit($this->uploads_dir) . 'plano_items_hashes.json';
+    }
+
+    /**
+     * Load saved hash map (SKU => hex-hash). Returns [] on missing/invalid file.
+     */
+    private function load_hash_map(): array
+    {
+        $path = $this->get_hash_file_path();
+        if (!is_readable($path))
+            return [];
+        $json = @file_get_contents($path);
+        if ($json === false)
+            return [];
+        $data = json_decode($json, true);
+        return is_array($data) ? $data : [];
+    }
+
+    /**
+     * Persist hash map (atomic write). Returns bool success.
+     */
+    private function save_hash_map(array $map): bool
+    {
+        $path = $this->get_hash_file_path();
+        $tmp = $path . '.tmp';
+        $json = json_encode($map, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+        if ($json === false)
+            return false;
+        if (file_put_contents($tmp, $json) === false)
+            return false;
+        return rename($tmp, $path);
+    }
+
+    /**
+     * Convert SimpleXMLElement (or nested arrays/objects) into a pure PHP array suitable for canonicalization.
+     * Uses json encode/decode to flatten SimpleXML reliably.
+     */
+    private function xml_to_array(mixed $value): mixed
+    {
+        if ($value instanceof SimpleXMLElement) {
+            $json = json_encode($value);
+            $arr = json_decode($json, true);
+            return $this->xml_to_array($arr);
+        }
+        if (is_array($value)) {
+            $res = [];
+            foreach ($value as $k => $v)
+                $res[$k] = $this->xml_to_array($v);
+            return $res;
+        }
+        return $value;
+    }
+
+    /**
+     * Recursively normalize array for stable serialization: sort associative keys and normalize values.
+     */
+    private function normalize_for_hash(mixed $value): mixed
+    {
+        if (is_object($value)) {
+            $value = (array) $value;
+        }
+        if (is_array($value)) {
+            // detect associative array
+            $keys = array_keys($value);
+            $isAssoc = ($keys !== range(0, count($value) - 1));
+            if ($isAssoc)
+                ksort($value);
+            foreach ($value as $k => $v) {
+                $value[$k] = $this->normalize_for_hash($v);
+            }
+            return $value;
+        }
+        // Scalars keep as-is (cast floats/ints to scalars)
+        return $value;
+    }
+
+    /**
+     * Return canonical JSON for an item (stable across runs).
+     */
+    private function canonical_json(mixed $item): string
+    {
+        $arr = $this->xml_to_array($item);
+        $norm = $this->normalize_for_hash($arr);
+        // preserve numeric fractions; keep readable.
+        return json_encode($norm, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION);
+    }
+
+    /**
+     * Compute strong hex hash for an item. Default sha256.
+     */
+    private function compute_item_hash(mixed $item, string $algo = 'sha256'): string
+    {
+        $json = $this->canonical_json($item);
+        return hash($algo, $json);
+    }
+
+    /**
+     * Check whether item (SimpleXMLElement) differs from saved hash map.
+     * $keyField: field name to use as SKU/key in the map (default 'Code').
+     * Returns array: [ 'key' => (string)$key, 'hash' => (string)$hash, 'changed' => bool ]
+     */
+    private function check_item_changed(mixed $item_xml, array $old_map, string $keyField = 'Code'): array
+    {
+        // get key (SKU)
+        $key = '';
+        if (is_array($item_xml) && isset($item_xml[$keyField])) {
+            $key = (string) $item_xml[$keyField];
+        } elseif (is_object($item_xml) && property_exists($item_xml, $keyField)) {
+            $key = (string) $item_xml->{$keyField};
+        } else {
+            // best effort: attempt to read Code child
+            if (isset($item_xml->Code))
+                $key = (string) $item_xml->Code;
+        }
+        $hash = $this->compute_item_hash($item_xml);
+        $old = isset($old_map[$key]) ? (string) $old_map[$key] : null;
+        $changed = ($old === null) || !hash_equals((string) $hash, (string) $old);
+        return ['key' => (string) $key, 'hash' => $hash, 'changed' => $changed];
+    }
+
+    /**
+     * Update in-memory hash map for a given SKU key.
+     */
+    private function update_hash_map_entry(array &$map, string $key, string $hash): void
+    {
+        $map[$key] = $hash;
+    }
+
+
 }
 class WP_Woo_Plano_Importer {
     private $core; 
