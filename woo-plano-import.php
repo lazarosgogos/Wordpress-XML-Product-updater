@@ -275,35 +275,95 @@ class Plano_Importer_Core
         $product->set_description($desc);
         $product->set_short_description(wp_trim_words(strip_tags($desc), 30));
 
-        //categories
-        $cat_path = (string) $item_xml->CategoryFullPath;
-        
-        if ($cat_path) {
-            /**
-             * Example:
-             *  Input: $cat_path = "parent/ child /grandchild/"
-             *  Output: $terms = ["parent", "child", "grandchild"]
-             */
-            $terms = array_filter(array_map('trim', explode('/', $cat_path)));
+        //  //categories
+        // $cat_path = (string) $item_xml->CategoryFullPath;
 
+        // if ($cat_path) {
+        //     /**
+        //      * Example:
+        //      *  Input: $cat_path = "parent/ child /grandchild/"
+        //      *  Output: $terms = ["parent", "child", "grandchild"]
+        //      */
+        //     $terms = array_filter(array_map('trim', explode('/', $cat_path)));
+
+        //     $term_ids = [];
+        //     foreach ($terms as $t) {
+        //         $term = term_exists($t, 'product_cat');
+        //         if ($term === 0 || $term === null) {
+        //             $new = wp_insert_term($t, 'product_cat');
+        //             if (!is_wp_error($new) && isset($new['term_id']))
+        //                 $term_ids[] = intval($new['term_id']);
+        //         } else {
+        //             $term_ids[] = is_array($term) ? intval($term['term_id']) : intval($term);
+        //         }
+        //     }
+
+        //     if (!empty($term_ids)) {
+        //         // if product exists, use its ID, else we'll assign after save
+        //         $product_id_for_terms = $product->get_id() ?: 0;
+        //         wp_set_object_terms($product_id_for_terms, $term_ids, 'product_cat', false);
+        //     }
+        // } 
+        // categories (hierarchical)
+        $cat_path = (string) $item_xml->CategoryFullPath;
+        if ($cat_path) {
+            // "parent/ child /grandchild/" -> ["parent","child","grandchild"]
+            $terms = array_values(array_filter(array_map('trim', explode('/', $cat_path))));
+
+            $parent_id = 0;    // parent for the next term
+            $parent_slug = '';   // used to build unique slugs
             $term_ids = [];
+
             foreach ($terms as $t) {
-                $term = term_exists($t, 'product_cat');
-                if ($term === 0 || $term === null) {
-                    $new = wp_insert_term($t, 'product_cat');
-                    if (!is_wp_error($new) && isset($new['term_id']))
-                        $term_ids[] = intval($new['term_id']);
+                if ($t === '')
+                    continue;
+                $name = $t;
+
+                // create a slug that includes parent slug to avoid collisions
+                $slug = $parent_slug ? $parent_slug . '-' . sanitize_title($name) : sanitize_title($name);
+
+                // Try to find existing term by slug (slugs are unique in a taxonomy)
+                $existing = get_term_by('slug', $slug, 'product_cat');
+
+                if ($existing && !is_wp_error($existing)) {
+                    $term_id = intval($existing->term_id);
+
+                    // If parent differs, update it so the term becomes child of $parent_id
+                    if (intval($existing->parent) !== intval($parent_id)) {
+                        wp_update_term($term_id, 'product_cat', ['parent' => $parent_id]);
+                    }
                 } else {
-                    $term_ids[] = is_array($term) ? intval($term['term_id']) : intval($term);
+                    // insert term with parent
+                    $new = wp_insert_term($name, 'product_cat', [
+                        'slug' => $slug,
+                        'parent' => $parent_id,
+                    ]);
+                    if (is_wp_error($new)) {
+                        $this->log("Failed creating category '{$name}': " . $new->get_error_message());
+                        continue;
+                    }
+                    $term_id = intval($new['term_id']);
                 }
+
+                $term_ids[] = $term_id;
+                $parent_id = $term_id;    // next term will be child of this
+                $parent_slug = $slug;      // propagate slug for uniqueness
             }
 
             if (!empty($term_ids)) {
-                // if product exists, use its ID, else we'll assign after save
+                // If product exists now, assign deepest child immediately; otherwise
+                // it will be assigned after save by your existing "if (isset($term_ids)) wp_set_object_terms(...)" block.
                 $product_id_for_terms = $product->get_id() ?: 0;
-                wp_set_object_terms($product_id_for_terms, $term_ids, 'product_cat', false);
+                $deepest = intval(end($term_ids));
+
+                if ($product_id_for_terms) {
+                    // assign only the deepest (common pattern). If you prefer assigning the full chain,
+                    // pass $term_ids instead of [$deepest].
+                    wp_set_object_terms($product_id_for_terms, [$deepest], 'product_cat', false);
+                }
             }
         }
+
 
         // series -> product attribute Series
         $series_code = (string) $item_xml->ProductSeriesCode;
