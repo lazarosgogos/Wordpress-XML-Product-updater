@@ -15,7 +15,8 @@ include("optimized-updater.php");
 /**
  * WP wrapper: admin UI, cron hook, activation/deactivation
  */
-class Plano_Importer_Core {
+class Plano_Importer_Core
+{
 
     private $feeds = [];
     private $log_file;
@@ -41,7 +42,8 @@ class Plano_Importer_Core {
     /**
      * Fetch XML from URL and return SimpleXMLElement or false
      */
-    public function fetch_url_xml($url) {
+    public function fetch_url_xml($url)
+    {
         $resp = wp_remote_get($url, ['timeout' => 30]);
         if (is_wp_error($resp)) {
             $this->log("HTTP error fetching {$url}: " . $resp->get_error_message());
@@ -180,9 +182,9 @@ class Plano_Importer_Core {
             delete_transient('plano_import_lock');
             return 0;
         }
-        
+
         $items_arr = [];
-        foreach ($xml->Item as $it) 
+        foreach ($xml->Item as $it)
             $items_arr[] = $it;
         if ($offset >= count($items_arr)) {
             // reached end - reset offset and nothing to process
@@ -191,16 +193,25 @@ class Plano_Importer_Core {
             delete_transient(('plano_import_lock'));
             return 0;
         }
-        
+
+        $hash_map = $this->load_hash_map();
+
         $slice = array_slice($items_arr, $offset, $batch);
         $processed = 0;
         foreach ($slice as $item) {
+            $check = $this->check_item_changed($item, $hash_map, 'Code');
+            if (!$check['changed']) {
+                $this->log("Skipping unchanged SKU={$check['key']}");
+                continue;
+            }
             try {
                 $this->process_item($item, $images_map, $series_map);
                 $processed++;
+                $this->update_hash_map_entry($hash_map, $check['key'], $check['hash']);
             } catch (Exception $e) {
                 $this->log("Exception processing item (offset" . ($offset + $processed) . "): " . $e->getMessage());
             }
+            $this->save_hash_map($hash_map);
         }
 
         // advance pointer; if we reached the end, reset to 0 so next run can cycle
@@ -217,9 +228,12 @@ class Plano_Importer_Core {
         return $processed;
     }
 
-    public function process_item($item_xml, $images_map = [], 
-    $series_map = []){
-        if (! function_exists('wc_get_product_id_by_sku')) {
+    public function process_item(
+        $item_xml,
+        $images_map = [],
+        $series_map = []
+    ) {
+        if (!function_exists('wc_get_product_id_by_sku')) {
             $this->log('WooCommerce functions not available. Aborting item processing.');
             return;
         }
@@ -253,37 +267,41 @@ class Plano_Importer_Core {
         $product->set_slug($slug);
 
         $price = (string) $item_xml->PriceWithVat;
-        if ($price === '') $price = (string) $item_xml->NetPrice;
-        if ($price !== '') $product->set_regular_price((float) $price);
+        if ($price === '')
+            $price = (string) $item_xml->NetPrice;
+        if ($price !== '')
+            $product->set_regular_price((float) $price);
 
         $product->set_description($desc);
         $product->set_short_description(wp_trim_words(strip_tags($desc), 30));
 
         //categories
         $cat_path = (string) $item_xml->CategoryFullPath;
+        
         if ($cat_path) {
             /**
              * Example:
              *  Input: $cat_path = "parent/ child /grandchild/"
              *  Output: $terms = ["parent", "child", "grandchild"]
              */
-            $terms = array_filter(array_map('trim', explode('/',$cat_path)));
+            $terms = array_filter(array_map('trim', explode('/', $cat_path)));
 
             $term_ids = [];
-            foreach($terms as $t) {
+            foreach ($terms as $t) {
                 $term = term_exists($t, 'product_cat');
                 if ($term === 0 || $term === null) {
                     $new = wp_insert_term($t, 'product_cat');
-                    if (!is_wp_error($new) && isset ($new['term_id'])) $term_ids[] = intval($new['term_id']);
-                } else{ 
-                    $term_ids[] = is_array($term) ? intval($term['term_id'])  : intval($term);
+                    if (!is_wp_error($new) && isset($new['term_id']))
+                        $term_ids[] = intval($new['term_id']);
+                } else {
+                    $term_ids[] = is_array($term) ? intval($term['term_id']) : intval($term);
                 }
             }
 
-            if (!empty ($term_ids)){
+            if (!empty($term_ids)) {
                 // if product exists, use its ID, else we'll assign after save
                 $product_id_for_terms = $product->get_id() ?: 0;
-                wp_set_object_terms($product_id_for_terms, $term_ids, 'product_cat', false );
+                wp_set_object_terms($product_id_for_terms, $term_ids, 'product_cat', false);
             }
         }
 
@@ -301,12 +319,13 @@ class Plano_Importer_Core {
 
         // images
         $code_key = $code;
-        if (isset($images_map[$code_key]) && is_array($images_map[ $code_key ])) {
-            ksort($images_map[ $code_key ]);
+        if (isset($images_map[$code_key]) && is_array($images_map[$code_key])) {
+            ksort($images_map[$code_key]);
             $attach_ids = [];
-            foreach($images_map[ $code_key ] as $order => $img_url) {
+            foreach ($images_map[$code_key] as $order => $img_url) {
                 $aid = $this->sideload_image_to_media(($img_url));
-                if ($aid) $attach_ids[] = $aid;
+                if ($aid)
+                    $attach_ids[] = $aid;
             }
             if (!empty($attach_ids)) {
                 $attach_ids = array_values(array_unique(($attach_ids)));
@@ -340,9 +359,9 @@ class Plano_Importer_Core {
         } else {
             $this->log("Saved product SKU={$sku} ID={$product_id}");
             // ensure categories (if we assigned earlier with product id 0)
-            if (isset($term_ids) && !empty($term_ids)) 
+            if (isset($term_ids) && !empty($term_ids))
                 wp_set_object_terms($product_id, $term_ids, 'product_cat', false);
-            
+
         }
     }
 
@@ -602,8 +621,9 @@ class Plano_Importer_Core {
 
 
 }
-class WP_Woo_Plano_Importer {
-    private $core; 
+class WP_Woo_Plano_Importer
+{
+    private $core;
 
     private $option_name = 'plano_importer_opts';
 
@@ -617,36 +637,38 @@ class WP_Woo_Plano_Importer {
         'cron_batch' => 50,
     ];
 
-    public function __construct() {
+    public function __construct()
+    {
         $opts = get_option($this->option_name, []);
         $opts = wp_parse_args($opts, $this->defaults);
 
         // if user didn't set custom URLs, use the core defaults
         $feeds = [];
         $feeds['items'] = $opts['items_url'] ?: '';
-        $feeds['series'] = $opts['series_url'] ?:'';
+        $feeds['series'] = $opts['series_url'] ?: '';
         $feeds['images'] = $opts['images_url'] ?: '';
         $feeds['attributes'] = $opts['attributes_url'] ?: '';
         $feeds['features'] = $opts['features_url'] ?: '';
 
         // if any feed missing, let core use defaults
-        foreach ( $feeds as $k => $v) {
-            if (empty ($v)) {
+        foreach ($feeds as $k => $v) {
+            if (empty($v)) {
                 unset($feeds[$k]);
             }
         }
 
         $this->core = new Plano_Importer_Core($feeds);
-        add_action('admin_menu', [$this,'admin_menu']);
-        add_action('admin_post_plano_import_run', [$this,'handle_manual_run']);
+        add_action('admin_menu', [$this, 'admin_menu']);
+        add_action('admin_post_plano_import_run', [$this, 'handle_manual_run']);
 
-        register_activation_hook(__FILE__, [$this,'on_activate']);
-        register_deactivation_hook(__FILE__, [$this,'on_deactivate']);
+        register_activation_hook(__FILE__, [$this, 'on_activate']);
+        register_deactivation_hook(__FILE__, [$this, 'on_deactivate']);
 
         // more WP-CLI commands if available, omitted here
     }
 
-    public function admin_menu() {
+    public function admin_menu()
+    {
         add_management_page(
             'Plano Importer',
             'Plano Importer',
@@ -656,8 +678,10 @@ class WP_Woo_Plano_Importer {
         );
     }
 
-    public function admin_page() {
-        if (!current_user_can('manage_options')) return;
+    public function admin_page()
+    {
+        if (!current_user_can('manage_options'))
+            return;
         $opts = get_option($this->option_name, []);
         $opts = wp_parse_args($opts, $this->defaults);
         $log_tail = $this->core->get_log_tail(4000);
@@ -665,56 +689,67 @@ class WP_Woo_Plano_Importer {
         <div class="wrap">
             <h1>Plano Importer</h1>
             <form method="post" action="<?php echo esc_url(
-                admin_url('admin-post.php')); ?>">
+                admin_url('admin-post.php')
+            ); ?>">
                 <?php wp_nonce_field('plano_import_run'); ?>
                 <input type="hidden" name="action" value="plano_import_run" />
                 <table class="form-table">
                     <tr>
                         <th>Items feed URL</th>
-                        <td><input type="text" name="items_url" value="<?php echo esc_attr( $opts['items_url'] ); ?>" size="80" /></td>
+                        <td><input type="text" name="items_url" value="<?php echo esc_attr($opts['items_url']); ?>"
+                                size="80" /></td>
                     </tr>
                     <tr>
                         <th>ProductSeries feed URL</th>
-                        <td><input type="text" name="series_url" value="<?php echo esc_attr( $opts['series_url'] ); ?>" size="80" /></td>
+                        <td><input type="text" name="series_url" value="<?php echo esc_attr($opts['series_url']); ?>"
+                                size="80" /></td>
                     </tr>
                     <tr>
                         <th>Images feed URL</th>
-                        <td><input type="text" name="images_url" value="<?php echo esc_attr( $opts['images_url'] ); ?>" size="80" /></td>
+                        <td><input type="text" name="images_url" value="<?php echo esc_attr($opts['images_url']); ?>"
+                                size="80" /></td>
                     </tr>
                     <tr>
                         <th>Attributes feed URL</th>
-                        <td><input type="text" name="attributes_url" value="<?php echo esc_attr( $opts['attributes_url'] ); ?>" size="80" /></td>
+                        <td><input type="text" name="attributes_url" value="<?php echo esc_attr($opts['attributes_url']); ?>"
+                                size="80" /></td>
                     </tr>
                     <tr>
                         <th>Features feed URL</th>
-                        <td><input type="text" name="features_url" value="<?php echo esc_attr( $opts['features_url'] ); ?>" size="80" /></td>
+                        <td><input type="text" name="features_url" value="<?php echo esc_attr($opts['features_url']); ?>"
+                                size="80" /></td>
                     </tr>
                     <tr>
                         <th>Manual batch size</th>
-                        <td><input type="number" name="batch" value="<?php echo esc_attr( $opts['batch'] ); ?>" min="1" max="500" /></td>
+                        <td><input type="number" name="batch" value="<?php echo esc_attr($opts['batch']); ?>" min="1"
+                                max="500" /></td>
                     </tr>
                     <tr>
                         <th>Cron batch size (per daily run) - DEPRECATED</th>
-                        <td><input type="number" name="cron_batch" value="<?php echo esc_attr( $opts['cron_batch'] ); ?>" min="1" max="1000" /></td>
+                        <td><input type="number" name="cron_batch" value="<?php echo esc_attr($opts['cron_batch']); ?>"
+                                min="1" max="1000" /></td>
                     </tr>
                 </table>
 
                 <p class="submit">
                     <input type="submit" class="button button-primary" value="Save & Run" />
                     &nbsp;&nbsp;
-                    <label style="font-weight:normal;"><input type="checkbox" name="reset_pointer" value="1" /> Reset pointer to start</label>
+                    <label style="font-weight:normal;"><input type="checkbox" name="reset_pointer" value="1" /> Reset pointer to
+                        start</label>
                 </p>
             </form>
             <h2>Logs (last lines)</h2>
-            <pre style="max-height:300px; overflow:auto; padding:10px; background:#fff; border:1px solid #ddd;"><?php echo esc_html( $log_tail ); ?></pre>
+            <pre
+                style="max-height:300px; overflow:auto; padding:10px; background:#fff; border:1px solid #ddd;"><?php echo esc_html($log_tail); ?></pre>
 
             <h2>Manual actions</h2>
-            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-                <?php wp_nonce_field( 'plano_import_run' ); ?>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <?php wp_nonce_field('plano_import_run'); ?>
                 <input type="hidden" name="action" value="plano_import_run" />
-                <input type="hidden" name="batch" value="<?php echo esc_attr( $opts['batch'] ); ?>" />
+                <input type="hidden" name="batch" value="<?php echo esc_attr($opts['batch']); ?>" />
                 <p>
-                    <button class="button button-primary" type="submit">Run one batch now (<?php echo intval( $opts['batch'] ); ?>)</button>
+                    <button class="button button-primary" type="submit">Run one batch now
+                        (<?php echo intval($opts['batch']); ?>)</button>
                     &nbsp;
                     <label><input type="checkbox" name="reset_pointer" value="1" /> Reset pointer first</label>
                 </p>
@@ -723,7 +758,8 @@ class WP_Woo_Plano_Importer {
         <?php
     }
 
-    public function handle_manual_run() {
+    public function handle_manual_run()
+    {
         if (!current_user_can('manage_options')) {
             wp_die('Unauthorized');
         }
@@ -735,13 +771,14 @@ class WP_Woo_Plano_Importer {
         // save posted URLs / settings if present
         $posted = false;
         $fields = ['items_url', 'series_url', 'images_url', 'attributes_url', 'features_url', 'batch', 'cron_batch'];
-        foreach( $fields as $f ) {
+        foreach ($fields as $f) {
             if (isset($_POST[$f])) {
                 $opts[$f] = sanitize_text_field(wp_unslash($_POST[$f]));
                 $posted = true;
             }
         }
-        if ($posted) update_option($this->option_name, $opts);
+        if ($posted)
+            update_option($this->option_name, $opts);
 
         // If reset_pointer checkbox is set, perform ONLY the reset and do NOT run the import
         if (isset($_POST['reset_pointer']) && $_POST['reset_pointer']) {
@@ -763,8 +800,12 @@ class WP_Woo_Plano_Importer {
         exit;
     }
 
-    public function on_activate() {}
-    public function on_deactivate() {}
+    public function on_activate()
+    {
+    }
+    public function on_deactivate()
+    {
+    }
 
 }
 $WP_Woo_Plano_Importer = new WP_Woo_Plano_Importer();
