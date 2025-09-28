@@ -303,25 +303,49 @@ class Plano_Importer_Core
                 $existing = get_term_by('slug', $slug, 'product_cat');
 
                 if ($existing && !is_wp_error($existing)) {
-                    // If same-name term exists, reuse it and ensure correct parent
+                    // If same-name term exists (byte-for-byte), reuse it and ensure correct parent
                     if (strcmp($existing->name, $name) === 0) {
                         $term_id = intval($existing->term_id);
                         if (intval($existing->parent) !== intval($parent_id)) {
                             wp_update_term($term_id, 'product_cat', ['parent' => $parent_id]);
                         }
                     } else {
-                        // collision with different name — make unique suffix (WP constraint)
-                        $i = 2;
-                        while (get_term_by('slug', $slug . '-' . $i, 'product_cat')) {
-                            $i++;
+                        // Slug collision: try to merge instead of creating a new suffixed term.
+                        // 1) If there's already a term with the desired NAME under the target parent, move objects to it and delete the colliding term.
+                        $term_exists = term_exists($name, 'product_cat', $parent_id);
+                        if ($term_exists) {
+                            $target_id = is_array($term_exists) ? intval($term_exists['term_id']) : intval($term_exists);
+
+                            // Move objects (products) from the colliding term to the target term
+                            $objs = get_objects_in_term($existing->term_id, 'product_cat');
+                            if (!is_wp_error($objs) && is_array($objs) && !empty($objs)) {
+                                foreach ($objs as $obj_id) {
+                                    // Add target term to object (append)
+                                    wp_set_object_terms($obj_id, [$target_id], 'product_cat', true);
+
+                                    // Remove the old term from object terms
+                                    $current = wp_get_object_terms($obj_id, 'product_cat', ['fields' => 'ids']);
+                                    if (!is_wp_error($current) && is_array($current)) {
+                                        $new_terms = array_values(array_diff($current, [$existing->term_id]));
+                                        wp_set_object_terms($obj_id, $new_terms, 'product_cat', false);
+                                    }
+                                }
+                            }
+
+                            // delete the colliding term (clean up)
+                            wp_delete_term($existing->term_id, 'product_cat');
+
+                            // use target as our term
+                            $term_id = $target_id;
+                        } else {
+                            // 2) No existing same-name term under parent: rename & reparent the colliding term to the desired name/parent.
+                            $res = wp_update_term($existing->term_id, 'product_cat', ['name' => $name, 'parent' => $parent_id]);
+                            if (is_wp_error($res)) {
+                                $this->log("Failed renaming/reparenting term {$existing->term_id}: " . $res->get_error_message());
+                                continue;
+                            }
+                            $term_id = intval($existing->term_id);
                         }
-                        $slug = $slug . '-' . $i;
-                        $new = wp_insert_term($name, 'product_cat', ['slug' => $slug, 'parent' => $parent_id]);
-                        if (is_wp_error($new)) {
-                            $this->log("Failed creating category '{$name}': " . $new->get_error_message());
-                            continue;
-                        }
-                        $term_id = intval($new['term_id']);
                     }
                 } else {
                     // create term with slug from name only
@@ -332,6 +356,7 @@ class Plano_Importer_Core
                     }
                     $term_id = intval($new['term_id']);
                 }
+
 
                 $term_ids[] = $term_id;
                 $parent_id = $term_id;
