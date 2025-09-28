@@ -1,0 +1,15 @@
+name: Run WordPress Cron Job
+
+on:
+  schedule:
+    # This cron expression will run at 00:00 AM, 00:15 AM, 00:30 AM, etc.
+    # all the way up to 8:45 AM UTC, every day.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run-cron-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Make HTTP request to trigger cron
+        run: curl --request GET 'https://gogos-corps.gr/wp/trigger-cron.php?key=${{ secrets.CRON_KEY }}'
