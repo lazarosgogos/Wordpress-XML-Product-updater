@@ -155,6 +155,40 @@ class Plano_Importer_Core
         return $map;
     }
 
+    public function fetch_item_features_map()
+    {
+        $url = $this->feeds['item_features'];
+        $xml = $this->fetch_url_xml($url);
+        $map = [];
+        if (!$xml)
+            return $map;
+        foreach ($xml->ItemFeature as $f) {
+            $feature_id = (string) $f->FeatureID;
+            $item_code = (string) $f->ItemCode;
+            if ($feature_id) {
+                $map[$item_code] = $feature_id;
+            }
+        }
+        return $map;
+    }
+
+    public function fetch_item_attributes_map() {
+        $url = $this->feeds['item_attributes'];
+        $xml = $this->fetch_url_xml($url);
+        $map = [];
+        if (!$xml) 
+            return $map;
+        foreach ($xml->ItemAttribute as $a) {
+            $item_code = (string) $a->ItemCode;
+            $attribute_code = (string) $a->AttributeCode;
+            $value = (string) $a->Value;
+            if ($item_code) {
+                $map[$item_code] = ['attribute_code' => $attribute_code, 'value' => $value];
+            }
+        }
+        return $map;
+    }
+
     public function get_items_count()
     {
         $xml = $this->fetch_url_xml($this->feeds['items']);
@@ -175,8 +209,10 @@ class Plano_Importer_Core
         // fetch maps once per batch
         $images_map = $this->fetch_images_map();
         $series_map = $this->fetch_series_map();
-        $attributes_map = $this->fetch_attributes_map();
+        // $attributes_map = $this->fetch_attributes_map();
         $features_map = $this->fetch_features_map();
+        $item_features_map = $this->fetch_item_features_map();
+        $item_attributes_map = $this->fetch_item_attributes_map();
 
         // fetch items feed
         $xml = $this->fetch_url_xml($this->feeds['items']);
@@ -208,7 +244,7 @@ class Plano_Importer_Core
                 continue;
             }
             try {
-                $this->process_item($item, $images_map, $series_map);
+                $this->process_item($item, $images_map, $series_map, $features_map, $item_features_map, $item_attributes_map);
                 $processed++;
                 $this->update_hash_map_entry($hash_map, $check['key'], $check['hash']);
             } catch (Exception $e) {
@@ -234,7 +270,10 @@ class Plano_Importer_Core
     public function process_item(
         $item_xml,
         $images_map = [],
-        $series_map = []
+        $series_map = [], 
+        $features_map =[], 
+        $item_features_map = [], 
+        $item_attributes_map = [],
     ) {
         if (!function_exists('wc_get_product_id_by_sku')) {
             $this->log('WooCommerce functions not available. Aborting item processing.');
@@ -400,6 +439,119 @@ class Plano_Importer_Core
             }
         }
 
+        // prepare attributes array
+        $attrs_array = $product->get_attributes();
+        if (!is_array($attrs_array)) {
+            $attrs_array = [];
+        }
+
+        $item_code = $code;
+        
+        // --- Item attributes ---
+        if (!empty($item_attributes_map) && $item_attributes_map[$item_code]) {
+            $entries = $item_attributes_map[$item_code];
+            // ensure list
+            if (!is_array($entries) || (isset($entries['attribute_code']) && isset($entries['value']))){
+                $entries = [$entries];
+            }
+
+            foreach ($entries as $entry) {
+                $attribute_code = isset($entry['attribute_code']) ? trim($entry['attribute_code']) : '';
+                $attribute_value = isset($entry['value']) ? trim($entry['value']) : '';
+
+                if ($attribute_code === '' || $attribute_value === '') continue;
+                
+
+                $attr_name = $attribute_code;
+
+                // merge into existing attribute if present
+                $merged = false;
+                foreach ($attrs_array as $existing_arr) {
+                    if (is_object($existing_attr) && strcasecmp($existing_attr->get_name(), $attr_name) === 0) {
+                        $options = (array) $existing_attr->get_options();
+                        if (!in_array($attribute_value, $options, true)) {
+                            $options[] = $attribute_value;
+                            $existing_attr->set_options($options);
+                        }
+                        $merged = true;
+                        break;
+                    }
+                }
+                if ($merged)  continue;
+                
+                // create new custom product attribute
+                $new_attr = new WC_Product_Attribute();
+                $new_attr->set_name($attr_name);
+                $new_attr->set_options([$attribute_value]);
+                $new_attr->set_visible(true);
+                $new_attr->set_variation(false);
+                $attrs_array[] = $new_attr;
+            }
+        }
+
+
+        // --- Item features (brands) ---
+        $brand_term_ids = [];
+        if (!empty($item_features_map) && isset($item_features_map[$item_code])) {
+            $feature_ids = $item_features_map[$item_code];
+            if (!is_array($feature_ids))
+                $feature_ids = [$feature_ids];
+
+            foreach ($feature_ids as $fid) {
+                if (empty($fid)) continue;
+
+                // $fdef = isset($features_map[$fid]) ? $features_map[$fid] : null;
+                $fdef = $features_map[$fid] ?? null;
+                $term_name = $fdef['value'] ?? $fdef['description'] ?? $fid;
+                $term_slug = sanitize_title($term_name);
+
+                // try to find existing brand term by slug
+                $existing = get_term_by('slug', $term_slug, 'product_brand');
+                if ($existing && !is_wp_error($existing)) {
+                    $term_id = intval($existing->term_id);
+                    // update description/name if changed
+                    $update_args = [];
+                    if (strcmp($existing->name, $term_name) !== 0)
+                        $update_args['name'] = $term_name;
+                    $fdesc = trim($fdef['description'] ?? '');
+                    if ($fdesc !== '' && strcmp($existing->description, $fdesc) !== 0)
+                        $update_args['description'] = $fdesc;
+                    if (!empty($update_args))
+                        wp_update_term($term_id, 'product_brand', $update_args);
+                } else {
+                    // create new brand term
+                    $insert = wp_insert_term($term_name, 'product_brand', ['slug' => $term_slug, 
+                    'description' => (isset($fdef['description']) ? $fdef['description'] : '')]);
+                    if (is_wp_error($insert)) {
+                        $this->log("Failed to create brand term '{$term_name}': " . $insert->get_error_message());
+                        continue;
+                    }
+                    $term_id = intval($insert['term_id']);
+                }
+
+                // attach image to term if available 
+                // (sideload to media and save thumbnail id)
+                if (!empty($fdef['image'])){
+                    $aid = $this->sideload_image_to_media($fdef['image']);
+                    if ($aid) {
+                        update_term_meta($term_id, 'thumbnail_id', $aid);
+                        update_term_meta($term_id, '_plano_feature_imiage', esc_url_raw($fdef['image']));
+                    }
+                }
+
+                if (!in_array($term_id, $brand_term_ids, true)){
+                    $brand_term_ids[] = $term_id;
+                }
+            }
+            // if product already exists, assign brands now
+            $existing_product_id = $product->get_id();
+            if ($existing_product_id)
+                wp_set_object_terms($existing_product_id, $brand_term_ids, 'product_brand', false);
+        }
+        
+        
+        $product->set_attributes($attrs_array);
+        
         // Save product
         $product_id = $product->save();
         if (!$product_id) {
@@ -410,7 +562,10 @@ class Plano_Importer_Core
             if (isset($term_ids) && !empty($term_ids))
                 wp_set_object_terms($product_id, $term_ids, 'product_cat', false);
 
+            if (!empty($brand_term_ids) && !empty($product_id))
+                wp_set_object_terms($product_id, $brand_term_ids, 'product_brand', false);
         }
+
     }
 
     private function sideload_image_to_media($image_url)
