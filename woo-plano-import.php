@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Woo Plano Importer
  * Description: Import / update WooCommerce products from Plano XML feeds in safe batches. Manual run, cron-safe support.
- * Version: 1.5
+ * Version: 1.6
  * Author: Lazaros Gogos
  * License: MIT License 
  */
@@ -165,9 +165,12 @@ class Plano_Importer_Core
         foreach ($xml->ItemFeature as $f) {
             $feature_id = (string) $f->FeatureID;
             $item_code = (string) $f->ItemCode;
-            if ($feature_id) {
-                $map[$item_code] = $feature_id;
-            }
+            if (empty($feature_id) || empty($item_code))
+                continue;
+            if (!isset($map[$item_code]))
+                $map[$item_code] = [];
+            $map[$item_code][] = $feature_id;
+            
         }
         return $map;
     }
@@ -182,9 +185,16 @@ class Plano_Importer_Core
             $item_code = (string) $a->ItemCode;
             $attribute_code = (string) $a->AttributeCode;
             $value = (string) $a->Value;
-            if ($item_code) {
-                $map[$item_code] = ['attribute_code' => $attribute_code, 'value' => $value];
-            }
+            if (empty($item_code))
+                continue;
+            if (!isset($map[$item_code]))
+                $map[$item_code] = [];
+            
+            $map[$item_code][] = [
+                'attribute_code' => $attribute_code, 
+                'value' => $value
+            ];
+            
         }
         return $map;
     }
@@ -273,7 +283,7 @@ class Plano_Importer_Core
         $series_map = [], 
         $features_map =[], 
         $item_features_map = [], 
-        $item_attributes_map = [],
+        $item_attributes_map = []
     ) {
         if (!function_exists('wc_get_product_id_by_sku')) {
             $this->log('WooCommerce functions not available. Aborting item processing.');
@@ -448,7 +458,7 @@ class Plano_Importer_Core
         $item_code = $code;
         
         // --- Item attributes ---
-        if (!empty($item_attributes_map) && $item_attributes_map[$item_code]) {
+        if (!empty($item_attributes_map) && isset($item_attributes_map[$item_code])) {
             $entries = $item_attributes_map[$item_code];
             // ensure list
             if (!is_array($entries) || (isset($entries['attribute_code']) && isset($entries['value']))){
@@ -466,7 +476,7 @@ class Plano_Importer_Core
 
                 // merge into existing attribute if present
                 $merged = false;
-                foreach ($attrs_array as $existing_arr) {
+                foreach ($attrs_array as $existing_attr) {
                     if (is_object($existing_attr) && strcasecmp($existing_attr->get_name(), $attr_name) === 0) {
                         $options = (array) $existing_attr->get_options();
                         if (!in_array($attribute_value, $options, true)) {
@@ -531,11 +541,11 @@ class Plano_Importer_Core
 
                 // attach image to term if available 
                 // (sideload to media and save thumbnail id)
-                if (!empty($fdef['image'])){
+                if (!empty($fdef['image'])) {
                     $aid = $this->sideload_image_to_media($fdef['image']);
                     if ($aid) {
                         update_term_meta($term_id, 'thumbnail_id', $aid);
-                        update_term_meta($term_id, '_plano_feature_imiage', esc_url_raw($fdef['image']));
+                        update_term_meta($term_id, '_plano_feature_image', esc_url_raw($fdef['image']));
                     }
                 }
 
