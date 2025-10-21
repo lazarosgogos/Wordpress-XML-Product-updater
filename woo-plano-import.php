@@ -25,12 +25,15 @@ class Plano_Importer_Core
     {
         // default feed base
         $base = 'https://plano.plus/api/eshop/Feed/GetEshopFeed/05ea5870-0f66-44be-827d-e501879a0330/';
+                
         $defaults = [
             'items' => $base . 'Items',
             'series' => $base . 'ProductSeries',
             'images' => $base . 'ItemImages',
             'attributes' => $base . 'Attributes',
             'features' => $base . 'Features',
+            'item_attributes' => $base . 'ItemAttributes',
+            'item_features' => $base . 'ItemFeatures'
         ];
         $this->feeds = wp_parse_args($feeds, $defaults);
 
