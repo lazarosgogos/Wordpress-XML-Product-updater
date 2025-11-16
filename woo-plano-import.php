@@ -143,7 +143,7 @@ class Plano_Importer_Core
         $map = [];
         if (!$xml)
             return $map;
-        foreach ($xml->feature as $f) {
+        foreach ($xml->Feature as $f) {
             $feature_id = (string) $f->FeatureID;
             $value = (string) $f->Value;
             $description = (string) $f->LongDescription;
@@ -239,7 +239,7 @@ class Plano_Importer_Core
             // reached end - reset offset and nothing to process
             update_option('plano_import_offset', 0, false);
             $this->log("Pointer was at/after end ({$offset}). Reset to 0.");
-            delete_transient(('plano_import_lock'));
+            delete_transient('plano_import_lock');
             return 0;
         }
 
@@ -251,6 +251,7 @@ class Plano_Importer_Core
             $check = $this->check_item_changed($item, $hash_map, 'Code');
             if (!$check['changed']) {
                 $this->log("Skipping unchanged SKU={$check['key']}");
+                $processed++;
                 continue;
             }
             try {
@@ -400,7 +401,11 @@ class Plano_Importer_Core
         }
 
 
-
+        // prepare attributes array
+        $attrs_array = $product->get_attributes();
+        if (!is_array($attrs_array)) {
+            $attrs_array = [];
+        }
 
         // series -> product attribute Series
         $series_code = (string) $item_xml->ProductSeriesCode;
@@ -411,7 +416,8 @@ class Plano_Importer_Core
             $attr->set_options([$series_name]);
             $attr->set_visible(true);
             $attr->set_variation(false);
-            $product->set_attributes([$attr]);
+            // $product->set_attributes([$attr]);
+            $attrs_array[] = $attr;
         }
 
         // images
@@ -449,11 +455,7 @@ class Plano_Importer_Core
             }
         }
 
-        // prepare attributes array
-        $attrs_array = $product->get_attributes();
-        if (!is_array($attrs_array)) {
-            $attrs_array = [];
-        }
+        
 
         $item_code = $code;
         
@@ -559,8 +561,8 @@ class Plano_Importer_Core
                 wp_set_object_terms($existing_product_id, $brand_term_ids, 'product_brand', false);
         }
         
-        
-        $product->set_attributes($attrs_array);
+        if (!empty($attrs_array))
+            $product->set_attributes($attrs_array);
         
         // Save product
         $product_id = $product->save();
@@ -575,7 +577,6 @@ class Plano_Importer_Core
             if (!empty($brand_term_ids) && !empty($product_id))
                 wp_set_object_terms($product_id, $brand_term_ids, 'product_brand', false);
         }
-
     }
 
     private function sideload_image_to_media($image_url)
