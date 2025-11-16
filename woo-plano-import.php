@@ -39,7 +39,13 @@ class Plano_Importer_Core
 
         $uploads = wp_get_upload_dir();
         $this->uploads_dir = $uploads['basedir'];
-        $this->log_file = trailingslashit($this->uploads_dir) . 'woo-plano-import-GOGOS.log';
+        // $this->log_file = trailingslashit($this->uploads_dir) . 'woo-plano-import-GOGOS.log';
+        $this->update_log_file_name();
+    }
+
+    public function update_log_file_name(){
+        $date = date_i18n('Y-m');
+        $this->log_file = trailingslashit($this->uploads_dir) . 'woo-plano-import'. $date. '.log';
     }
 
     /**
@@ -208,7 +214,8 @@ class Plano_Importer_Core
     }
 
     public function do_import_batch($batch = 10)
-    {
+    {   
+        $this->update_log_file_name();
         if (get_transient('plano_import_lock')) {
             $this->log('Import skipped: lock present');
             return 0;
@@ -674,7 +681,6 @@ class Plano_Importer_Core
 
     public function log($msg)
     {
-        // TODO FIX THE FILE SIZE ISSUE !!!!
         $time = date_i18n('Y-m-d H:i:s');
         $entry = "[PlanoImporter] {$time} - {$msg}\n";
         error_log($entry, 3, $this->log_file);
