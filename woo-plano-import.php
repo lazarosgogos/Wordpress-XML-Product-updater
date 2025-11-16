@@ -674,6 +674,7 @@ class Plano_Importer_Core
 
     public function log($msg)
     {
+        // TODO FIX THE FILE SIZE ISSUE !!!!
         $time = date_i18n('Y-m-d H:i:s');
         $entry = "[PlanoImporter] {$time} - {$msg}\n";
         error_log($entry, 3, $this->log_file);
