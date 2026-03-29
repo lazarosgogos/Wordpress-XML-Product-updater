@@ -24,6 +24,7 @@ class Plano_Importer_Core
     public function __construct($feeds = [])
     {
         // default feed base
+        // getenv()
         $base = 'https://plano.plus/api/eshop/Feed/GetEshopFeed/05ea5870-0f66-44be-827d-e501879a0330/';
                 
         $defaults = [
@@ -45,7 +46,7 @@ class Plano_Importer_Core
 
     public function update_log_file_name(){
         $date = date_i18n('Y-m');
-        $this->log_file = trailingslashit($this->uploads_dir) . 'woo-plano-import'. $date. '.log';
+        $this->log_file = trailingslashit($this->uploads_dir) . 'woo-plano-import-'. $date. '.log';
     }
 
     /**
