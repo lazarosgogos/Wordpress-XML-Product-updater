@@ -47,6 +47,68 @@ class Plano_Importer_Core
         $this->log_file = trailingslashit($this->uploads_dir) . 'woo-plano-import-'. $date. '.log';
     }
 
+    private function get_seen_skus_file_path(): string
+    {
+        return trailingslashit($this->uploads_dir) . 'plano_seen_skus.json';
+    }
+
+    private function load_seen_skus(): array
+    {
+        $path = $this->get_seen_skus_file_path();
+        if (!is_readable($path)) return [];
+        $json = @file_get_contents($path);
+        if ($json === false) return [];
+        $data = json_decode($json, true);
+        return is_array($data) ? $data : [];
+    }
+
+    private function save_seen_skus(array $skus): bool
+    {
+        $path = $this->get_seen_skus_file_path();
+        $tmp = $path . '.tmp';
+        $json = json_encode(array_values(array_unique($skus)), JSON_PRETTY_PRINT);
+        if ($json === false) return false;
+        if (file_put_contents($tmp, $json) === false) return false;
+        return rename($tmp, $path);
+    }
+
+    private function reconcile_deletions(array $seen_skus): void
+    {
+        global $wpdb;
+
+        // Get all product IDs marked as plano-imported
+        $imported_ids = $wpdb->get_results(
+            "SELECT post_id, meta_value as sku FROM {$wpdb->postmeta} 
+            WHERE meta_key = '_plano_imported' AND meta_value != ''"
+        );
+
+        if (empty($imported_ids)) {
+            $this->log("Reconciliation: no _plano_imported products found, skipping.");
+            return;
+        }
+
+        // Build SKU => post_id map from DB
+        $db_skus = [];
+        foreach ($imported_ids as $row) {
+            $sku = get_post_meta($row->post_id, '_sku', true);
+            if ($sku) $db_skus[$sku] = intval($row->post_id);
+        }
+
+        $seen_set = array_flip($seen_skus);
+        $missing = array_diff_key($db_skus, $seen_set);
+
+        if (empty($missing)) {
+            $this->log("Reconciliation: no deleted products detected.");
+            return;
+        }
+
+        foreach ($missing as $sku => $post_id) {
+            wp_update_post(['ID' => $post_id, 'post_status' => 'draft']);
+            $this->log("Reconciliation: unpublished SKU={$sku} (ID={$post_id}) — not found in feed.");
+        }
+
+        $this->log("Reconciliation complete: " . count($missing) . " products unpublished.");
+    }
     /**
      * Fetch XML from URL and return SimpleXMLElement or false
      */
@@ -270,11 +332,26 @@ class Plano_Importer_Core
         }
         $this->save_hash_map($hash_map);
 
+        // After the foreach ($slice as $item) loop, add:
+        $seen_skus = $this->load_seen_skus();
+        foreach ($slice as $item) {
+            $sku = trim((string) $item->Code);
+            if ($sku) $seen_skus[] = $sku;
+        }
+        $this->save_seen_skus($seen_skus);
+
         // advance pointer; if we reached the end, reset to 0 so next run can cycle
         $new_offset = $offset + $processed;
         if ($new_offset > count($items_arr)) {
             update_option('plano_import_offset', 0, false);
             $this->log("Processed {$processed} items and reached feed and -> pointer reset to 0.");
+            
+            // Run deletion reconciliation
+            $seen_skus = $this->load_seen_skus();
+            $this->reconcile_deletions($seen_skus);
+
+            // Clear seen SKUs for next cycle
+            $this->save_seen_skus([]);
         } else {
             update_option('plano_import_offset', $new_offset, false);
             $this->log("Batch finished: processed={$processed}, pointer set to {$new_offset}");
@@ -576,6 +653,7 @@ class Plano_Importer_Core
             $this->log("Failed saving product SKU={$sku}");
         } else {
             $this->log("Saved product SKU={$sku} ID={$product_id}");
+            update_post_meta($product_id, '_plano_imported', 1);
             // ensure categories (if we assigned earlier with product id 0)
             if (isset($term_ids) && !empty($term_ids))
                 wp_set_object_terms($product_id, $term_ids, 'product_cat', false);
