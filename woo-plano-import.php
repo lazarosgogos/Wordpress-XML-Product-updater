@@ -342,7 +342,7 @@ class Plano_Importer_Core
 
         // advance pointer; if we reached the end, reset to 0 so next run can cycle
         $new_offset = $offset + $processed;
-        if ($new_offset > count($items_arr)) {
+        if ($new_offset >= count($items_arr)) {
             update_option('plano_import_offset', 0, false);
             $this->log("Processed {$processed} items and reached feed and -> pointer reset to 0.");
             
