@@ -267,6 +267,27 @@ class Plano_Importer_Core
         return $map;
     }
 
+    public function fetch_prices_map()
+    {
+        $url = $this->feeds['prices-gr'];
+        $xml = $this->fetch_url_xml($url);
+        $map = [];
+        if (!$xml)
+            return $map;
+        foreach ($xml->prices as $p) {
+            $code = (string) $p->Code;
+            if (empty($code))
+                continue;
+            $price_with_vat = (float) $p->CurrentPriceWithVat;
+            $sale_price = isset($p->SalePrice) && (string) $p->SalePrice !== '' ? (float) $p->SalePrice : null;
+            $map[$code] = [
+                'price_with_vat' => $price_with_vat,
+                'sale_price' => $sale_price,
+            ];
+        }
+        return $map;
+    }
+
     public function get_items_count()
     {
         $xml = $this->fetch_url_xml($this->feeds['items']);
@@ -292,6 +313,7 @@ class Plano_Importer_Core
         $features_map = $this->fetch_features_map();
         $item_features_map = $this->fetch_item_features_map();
         $item_attributes_map = $this->fetch_item_attributes_map();
+        $prices_map = $this->fetch_prices_map();
 
         // fetch items feed
         $xml = $this->fetch_url_xml($this->feeds['items']);
@@ -324,7 +346,7 @@ class Plano_Importer_Core
                 continue;
             }
             try {
-                $this->process_item($item, $images_map, $series_map, $features_map, $item_features_map, $item_attributes_map);
+                $this->process_item($item, $images_map, $series_map, $features_map, $item_features_map, $item_attributes_map, $prices_map);
                 $processed++;
                 $this->update_hash_map_entry($hash_map, $check['key'], $check['hash']);
             } catch (Exception $e) {
@@ -368,7 +390,8 @@ class Plano_Importer_Core
         $series_map = [], 
         $features_map =[], 
         $item_features_map = [], 
-        $item_attributes_map = []
+        $item_attributes_map = [],
+        $prices_map = []
     ) {
         if (!function_exists('wc_get_product_id_by_sku')) {
             $this->log('WooCommerce functions not available. Aborting item processing.');
@@ -403,11 +426,13 @@ class Plano_Importer_Core
         $product->set_name($name);
         $product->set_slug($slug);
 
-        $price = (string) $item_xml->PriceWithVat;
-        if ($price === '')
-            $price = (string) $item_xml->NetPrice;
-        if ($price !== '')
-            $product->set_regular_price((float) $price);
+        if (isset($prices_map[$code])) {
+            $p = $prices_map[$code];
+            $product->set_regular_price($p['price_with_vat']);
+            if ($p['sale_price'] !== null) {
+                $product->set_sale_price($p['sale_price']);
+            }
+        }
 
         $product->set_description($desc);
         $product->set_short_description(wp_trim_words(strip_tags($desc), 30));
