@@ -32,7 +32,8 @@ class Plano_Importer_Core
             'attributes' => $base . 'Attributes',
             'features' => $base . 'Features',
             'item_attributes' => $base . 'ItemAttributes',
-            'item_features' => $base . 'ItemFeatures'
+            'item_features' => $base . 'ItemFeatures', 
+            'prices-gr' => $base . 'Prices-GR'
         ];
         $this->feeds = wp_parse_args($feeds, $defaults);
 
