@@ -338,22 +338,30 @@ class Plano_Importer_Core
 
         $slice = array_slice($items_arr, $offset, $batch);
         $processed = 0;
+        $skipped = 0;
+        $updated_skus = [];
         foreach ($slice as $item) {
             $check = $this->check_item_changed($item, $hash_map, 'Code');
             if (!$check['changed']) {
-                $this->log("Skipping unchanged SKU={$check['key']}");
+                $skipped++;
                 $processed++;
                 continue;
             }
             try {
                 $this->process_item($item, $images_map, $series_map, $features_map, $item_features_map, $item_attributes_map, $prices_map);
                 $processed++;
+                $updated_skus[] = $check['key'];
                 $this->update_hash_map_entry($hash_map, $check['key'], $check['hash']);
             } catch (Exception $e) {
                 $this->log("Exception processing item (offset" . ($offset + $processed) . "): " . $e->getMessage());
             }
         }
         $this->save_hash_map($hash_map);
+
+        if ($skipped > 0) {
+            $sku_list = !empty($updated_skus) ? 'updated SKU: ' . implode(', ', $updated_skus) : '';
+            $this->log("Skipped {$skipped} unchanged items" . ($sku_list ? ", {$sku_list}" : ''));
+        }
 
         // After the foreach ($slice as $item) loop, add:
         $seen_skus = $this->load_seen_skus();
