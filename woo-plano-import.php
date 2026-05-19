@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Woo Plano Importer
  * Description: Import / update WooCommerce products from Plano XML feeds in safe batches. Manual run, cron-safe support.
- * Version: 1.6
+ * Version: 1.7
  * Author: Lazaros Gogos
  * License: MIT License 
  */
