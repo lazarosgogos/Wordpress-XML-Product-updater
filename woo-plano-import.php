@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Woo Plano Importer
  * Description: Import / update WooCommerce products from Plano XML feeds in safe batches. Manual run, cron-safe support.
- * Version: 1.7
+ * Version: 1.8
  * Author: Lazaros Gogos
  * License: MIT License 
  */
@@ -341,7 +341,7 @@ class Plano_Importer_Core
         $skipped = 0;
         $updated_skus = [];
         foreach ($slice as $item) {
-            $check = $this->check_item_changed($item, $hash_map, 'Code');
+            $check = $this->check_item_changed($item, $hash_map, 'Code', $prices_map);
             if (!$check['changed']) {
                 $skipped++;
                 $processed++;
@@ -911,20 +911,32 @@ class Plano_Importer_Core
     }
 
     /**
-     * Compute strong hex hash for an item. Default sha256.
+     * Compute strong hex hash for an item, optionally combined with price data.
+     * If $price_data is provided, the hash is computed over the concatenation of
+     * the item's canonical JSON and the price data's canonical JSON, separated by a null byte.
+     *
+     * @param mixed $item The item (SimpleXMLElement or array) to hash
+     * @param mixed|null $price_data Optional price data array to include in the hash
+     * @param string $algo Hash algorithm (default sha256)
+     * @return string Hex hash
      */
-    private function compute_item_hash(mixed $item, string $algo = 'sha256'): string
+    private function compute_item_hash(mixed $item, $price_data = null, string $algo = 'sha256'): string
     {
         $json = $this->canonical_json($item);
+        if ($price_data !== null) {
+            $price_json = $this->canonical_json($price_data);
+            $json .= "\x00" . $price_json;
+        }
         return hash($algo, $json);
     }
 
     /**
      * Check whether item (SimpleXMLElement) differs from saved hash map.
      * $keyField: field name to use as SKU/key in the map (default 'Code').
+     * $prices_map: optional price data map to include in hash calculation
      * Returns array: [ 'key' => (string)$key, 'hash' => (string)$hash, 'changed' => bool ]
      */
-    private function check_item_changed(mixed $item_xml, array $old_map, string $keyField = 'Code'): array
+    private function check_item_changed(mixed $item_xml, array $old_map, string $keyField = 'Code', array $prices_map = []): array
     {
         // get key (SKU)
         $key = '';
@@ -937,7 +949,10 @@ class Plano_Importer_Core
             if (isset($item_xml->Code))
                 $key = (string) $item_xml->Code;
         }
-        $hash = $this->compute_item_hash($item_xml);
+        
+        // Get price data for this SKU if available
+        $price_data = isset($prices_map[$key]) ? $prices_map[$key] : null;
+        $hash = $this->compute_item_hash($item_xml, $price_data);
         $old = isset($old_map[$key]) ? (string) $old_map[$key] : null;
         $changed = ($old === null) || !hash_equals((string) $hash, (string) $old);
         return ['key' => (string) $key, 'hash' => $hash, 'changed' => $changed];
