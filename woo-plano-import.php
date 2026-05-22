@@ -278,7 +278,10 @@ class Plano_Importer_Core
             $code = (string) $p->Code;
             if (empty($code))
                 continue;
-            $price_with_vat = (float) $p->CurrentPriceWithVat;
+            $price_with_vat_str = (string) $p->CurrentPriceWithVat;
+            if ($price_with_vat_str === '')
+                continue;
+            $price_with_vat = (float) $price_with_vat_str;
             $sale_price = isset($p->SalePrice) && (string) $p->SalePrice !== '' ? (float) $p->SalePrice : null;
             $map[$code] = [
                 'price_with_vat' => $price_with_vat,
@@ -439,6 +442,8 @@ class Plano_Importer_Core
             $product->set_regular_price($p['price_with_vat']);
             if ($p['sale_price'] !== null) {
                 $product->set_sale_price($p['sale_price']);
+            } else {
+                $product->set_sale_price('');
             }
         }
 
@@ -565,7 +570,7 @@ class Plano_Importer_Core
             $url1 = wp_get_attachment_url($featured_id);
             $url2 = wp_get_attachment_url($first_gallery_id);
 
-            if ($url1 === $url2) {
+            if ($url1 && $url2 && $url1 === $url2) {
                 // Remove the duplicate by shifting gallery (keep featured, remove first gallery item)
                 $new_gallery = array_slice($gallery_ids, 1);
                 $product->set_gallery_image_ids($new_gallery);
