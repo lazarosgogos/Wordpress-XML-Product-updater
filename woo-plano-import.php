@@ -1041,10 +1041,7 @@ class Plano_Importer_Core
             }
 
             $item_name = trim((string) $item->Name ?: (string) $item->NameEn);
-            $value = $this->derive_variation_value_from_name($item_name, $parent_name);
-            if ($value === '') {
-                $value = $item_name !== '' ? $item_name : $sku;
-            }
+            $value = $item_name !== '' ? $item_name : $sku;
 
             $raw_rows[] = [
                 'sku' => $sku,
@@ -1073,30 +1070,6 @@ class Plano_Importer_Core
             'attrs' => ['Επιλογή' => $values],
             'values' => $values_by_sku,
         ];
-    }
-
-    private function derive_variation_value_from_name(string $item_name, string $parent_name): string
-    {
-        $item_name = trim($item_name);
-        $parent_name = trim($parent_name);
-
-        if ($item_name === '') {
-            return '';
-        }
-
-        if ($parent_name !== '') {
-            $quoted = preg_quote($parent_name, '/');
-            $value = preg_replace('/^' . $quoted . '\b[\s\-_,;:\/]*/iu', '', $item_name, 1);
-            if (is_string($value) && trim($value) !== '' && trim($value) !== $item_name) {
-                return trim($value);
-            }
-        }
-
-        if (preg_match('/(\d+(?:[,.]\d+)?\s*(?:cm|mm|m|in|"))\b/i', $item_name, $matches)) {
-            return trim($matches[1]);
-        }
-
-        return '';
     }
 
     // =====================================================================
