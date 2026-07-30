@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Woo Plano Importer
  * Description: Import / update WooCommerce products from Plano XML feeds in safe batches. Manual run, cron-safe support.
- * Version: 1.8
+ * Version: 2.0
  * Author: Lazaros Gogos
  * License: MIT License 
  */
@@ -18,9 +18,102 @@ if (!defined("ABSPATH")) {
 class Plano_Importer_Core
 {
 
+    private const HASH_SCHEMA_VERSION = '2';
+
     private $feeds = [];
     private $log_file;
     private $uploads_dir;
+
+    /**
+     * Use one normalized SKU form for every feed map, hash, and WooCommerce lookup.
+     */
+    private function normalize_sku($value): string
+    {
+        return trim((string) $value);
+    }
+
+    /**
+     * Validate and normalize a feed price to the WooCommerce decimal precision.
+     */
+    private function normalize_feed_price($value): ?string
+    {
+        $raw = trim((string) $value);
+        if ($raw === '' || !is_numeric($raw) || (float) $raw < 0) {
+            return null;
+        }
+
+        $decimals = function_exists('wc_get_price_decimals') ? wc_get_price_decimals() : 2;
+        if (function_exists('wc_format_decimal')) {
+            $normalized = wc_format_decimal($raw, $decimals);
+        } else {
+            $normalized = number_format((float) $raw, $decimals, '.', '');
+        }
+
+        return $normalized === '' ? null : (string) $normalized;
+    }
+
+    /**
+     * Normalize a saved WooCommerce price for a stable comparison.
+     */
+    private function normalize_saved_price($value): string
+    {
+        if ($value === null || (string) $value === '') {
+            return '';
+        }
+
+        $normalized = $this->normalize_feed_price($value);
+        return $normalized === null ? '' : $normalized;
+    }
+
+    private function product_has_expected_price($product, array $expected): bool
+    {
+        if (!$product || !method_exists($product, 'get_regular_price')) {
+            return false;
+        }
+
+        $expected_regular = $this->normalize_saved_price($expected['price_with_vat'] ?? '');
+        if ($expected_regular === '') {
+            return false;
+        }
+
+        $actual_regular = $this->normalize_saved_price($product->get_regular_price('edit'));
+        if ($actual_regular !== $expected_regular) {
+            return false;
+        }
+
+        $expected_sale = $expected['sale_price'] ?? null;
+        $actual_sale = $this->normalize_saved_price($product->get_sale_price('edit'));
+        $actual_active = $this->normalize_saved_price($product->get_price('edit'));
+
+        if ($expected_sale === null) {
+            return $actual_sale === '' && $actual_active === $expected_regular;
+        }
+
+        $expected_sale = $this->normalize_saved_price($expected_sale);
+        return $expected_sale !== ''
+            && $actual_sale === $expected_sale
+            && $actual_active === $expected_sale;
+    }
+
+    /**
+     * Check the saved WooCommerce values, not only the feed hash.
+     */
+    private function stored_product_price_is_synced(string $sku, array $expected): bool
+    {
+        if (!function_exists('wc_get_product_id_by_sku') || !function_exists('wc_get_product')) {
+            return false;
+        }
+
+        $product_id = wc_get_product_id_by_sku($sku);
+        if (!$product_id) {
+            return false;
+        }
+
+        $product = wc_get_product($product_id);
+        return $product && $product->is_type('simple')
+            && $this->product_has_expected_price($product, $expected);
+    }
+
     public function __construct($feeds = [])
     {
 
@@ -60,14 +153,30 @@ class Plano_Importer_Core
         $json = @file_get_contents($path);
         if ($json === false) return [];
         $data = json_decode($json, true);
-        return is_array($data) ? $data : [];
+        if (!is_array($data)) return [];
+
+        $normalized = [];
+        foreach ($data as $sku) {
+            $sku = $this->normalize_sku($sku);
+            if ($sku !== '') {
+                $normalized[] = $sku;
+            }
+        }
+        return array_values(array_unique($normalized));
     }
 
     private function save_seen_skus(array $skus): bool
     {
         $path = $this->get_seen_skus_file_path();
         $tmp = $path . '.tmp';
-        $json = json_encode(array_values(array_unique($skus)), JSON_PRETTY_PRINT);
+        $normalized = [];
+        foreach ($skus as $sku) {
+            $sku = $this->normalize_sku($sku);
+            if ($sku !== '') {
+                $normalized[] = $sku;
+            }
+        }
+        $json = json_encode(array_values(array_unique($normalized)), JSON_PRETTY_PRINT);
         if ($json === false) return false;
         if (file_put_contents($tmp, $json) === false) return false;
         return rename($tmp, $path);
@@ -91,8 +200,8 @@ class Plano_Importer_Core
         // Build SKU => post_id map from DB
         $db_skus = [];
         foreach ($imported_ids as $row) {
-            $sku = get_post_meta($row->post_id, '_sku', true);
-            if ($sku) $db_skus[$sku] = intval($row->post_id);
+            $sku = $this->normalize_sku(get_post_meta($row->post_id, '_sku', true));
+            if ($sku !== '') $db_skus[$sku] = intval($row->post_id);
         }
 
         $seen_set = array_flip($seen_skus);
@@ -156,10 +265,10 @@ class Plano_Importer_Core
         if (!$xml)
             return $map;
         foreach ($xml->image as $img) {
-            $code = (string) $img->ItemCode;
+            $code = $this->normalize_sku($img->ItemCode);
             $url = (string) $img->ImageUrl;
             $order = isset($img->OrderNo) ? intval($img->OrderNo) : 0;
-            if (empty($code) || empty($url))
+            if ($code === '' || empty($url))
                 continue;
             if (!isset($map[$code])) {
                 $map[$code] = [];
@@ -232,7 +341,7 @@ class Plano_Importer_Core
             return $map;
         foreach ($xml->ItemFeature as $f) {
             $feature_id = (string) $f->FeatureID;
-            $item_code = (string) $f->ItemCode;
+            $item_code = $this->normalize_sku($f->ItemCode);
             if (empty($feature_id) || empty($item_code))
                 continue;
             if (!isset($map[$item_code]))
@@ -250,10 +359,10 @@ class Plano_Importer_Core
         if (!$xml) 
             return $map;
         foreach ($xml->ItemAttribute as $a) {
-            $item_code = (string) $a->ItemCode;
+            $item_code = $this->normalize_sku($a->ItemCode);
             $attribute_code = (string) $a->AttributeCode;
             $value = (string) $a->Value;
-            if (empty($item_code))
+            if ($item_code === '')
                 continue;
             if (!isset($map[$item_code]))
                 $map[$item_code] = [];
@@ -271,23 +380,94 @@ class Plano_Importer_Core
     {
         $url = $this->feeds['prices-gr'];
         $xml = $this->fetch_url_xml($url);
+        if (!$xml) {
+            $this->log('Prices-GR import stopped: the feed could not be loaded.');
+            return false;
+        }
+
         $map = [];
-        if (!$xml)
-            return $map;
+        $rows = 0;
+        $duplicates = 0;
+        $normalized_codes = 0;
+        $sale_rows = 0;
+        $invalid = [];
+        $conflicts = [];
+
         foreach ($xml->prices as $p) {
-            $code = (string) $p->Code;
-            if (empty($code))
+            $rows++;
+            $raw_code = (string) $p->Code;
+            $code = $this->normalize_sku($raw_code);
+            if ($raw_code !== $code) {
+                $normalized_codes++;
+            }
+            if ($code === '') {
+                $invalid[] = '(empty SKU)';
                 continue;
-            $price_with_vat_str = (string) $p->CurrentPriceWithVat;
-            if ($price_with_vat_str === '')
+            }
+
+            $price_with_vat = $this->normalize_feed_price($p->CurrentPriceWithVat);
+            if ($price_with_vat === null) {
+                $invalid[] = "{$code} (invalid CurrentPriceWithVat)";
                 continue;
-            $price_with_vat = (float) $price_with_vat_str;
-            $sale_price = isset($p->SalePrice) && (string) $p->SalePrice !== '' ? (float) $p->SalePrice : null;
-            $map[$code] = [
+            }
+
+            $sale_price = null;
+            $sale_price_raw = isset($p->SalePrice) ? trim((string) $p->SalePrice) : '';
+            if ($sale_price_raw !== '') {
+                $sale_price = $this->normalize_feed_price($sale_price_raw);
+                if ($sale_price === null || (float) $sale_price >= (float) $price_with_vat) {
+                    $invalid[] = "{$code} (invalid SalePrice)";
+                    continue;
+                }
+                $sale_rows++;
+            }
+
+            $entry = [
                 'price_with_vat' => $price_with_vat,
                 'sale_price' => $sale_price,
             ];
+
+            if (isset($map[$code])) {
+                $duplicates++;
+                if ($map[$code] !== $entry) {
+                    $conflicts[] = $code;
+                }
+                continue;
+            }
+
+            $map[$code] = $entry;
         }
+
+        $created_at = isset($xml['createdAt']) ? (string) $xml['createdAt'] : 'unknown';
+        $this->log(
+            "Prices-GR loaded: rows={$rows}, unique=" . count($map)
+            . ", duplicates={$duplicates}, normalized_skus={$normalized_codes}, "
+            . "sale_prices={$sale_rows}, created_at={$created_at}"
+        );
+
+        if (!empty($invalid)) {
+            $sample = implode(', ', array_slice(array_unique($invalid), 0, 10));
+            $this->log(
+                'Prices-GR import stopped: invalid rows=' . count($invalid)
+                . ". Sample: {$sample}"
+            );
+            return false;
+        }
+
+        if (!empty($conflicts)) {
+            $sample = implode(', ', array_slice(array_unique($conflicts), 0, 10));
+            $this->log(
+                'Prices-GR import stopped: conflicting duplicate SKUs=' . count(array_unique($conflicts))
+                . ". Sample: {$sample}"
+            );
+            return false;
+        }
+
+        if (empty($map)) {
+            $this->log('Prices-GR import stopped: the validated price map is empty.');
+            return false;
+        }
+
         return $map;
     }
 
@@ -307,92 +487,209 @@ class Plano_Importer_Core
             return 0;
         }
         set_transient('plano_import_lock', 1, 60 * 30);
-        $offset = max(0, intval(get_option('plano_import_offset', 0)));
+        try {
+            $offset = max(0, intval(get_option('plano_import_offset', 0)));
 
-        // fetch maps once per batch
-        $images_map = $this->fetch_images_map();
-        $series_map = $this->fetch_series_map();
-        // $attributes_map = $this->fetch_attributes_map();
-        $features_map = $this->fetch_features_map();
-        $item_features_map = $this->fetch_item_features_map();
-        $item_attributes_map = $this->fetch_item_attributes_map();
-        $prices_map = $this->fetch_prices_map();
-
-        // fetch items feed
-        $xml = $this->fetch_url_xml($this->feeds['items']);
-        if (!$xml) {
-            $this->log('Failed fetching Items feed');
-            delete_transient('plano_import_lock');
-            return 0;
-        }
-
-        $items_arr = [];
-        foreach ($xml->Item as $it)
-            $items_arr[] = $it;
-        if ($offset >= count($items_arr)) {
-            // reached end - reset offset and nothing to process
-            update_option('plano_import_offset', 0, false);
-            $this->log("Pointer was at/after end ({$offset}). Reset to 0.");
-            delete_transient('plano_import_lock');
-            return 0;
-        }
-
-        $hash_map = $this->load_hash_map();
-
-        $slice = array_slice($items_arr, $offset, $batch);
-        $processed = 0;
-        $skipped = 0;
-        $updated_skus = [];
-        foreach ($slice as $item) {
-            $check = $this->check_item_changed($item, $hash_map, 'Code', $prices_map);
-            if (!$check['changed']) {
-                $skipped++;
-                $processed++;
-                continue;
+            // Fetch maps once per batch.
+            $images_map = $this->fetch_images_map();
+            $series_map = $this->fetch_series_map();
+            $features_map = $this->fetch_features_map();
+            $item_features_map = $this->fetch_item_features_map();
+            $item_attributes_map = $this->fetch_item_attributes_map();
+            $prices_map = $this->fetch_prices_map();
+            if ($prices_map === false) {
+                throw new RuntimeException(
+                    'Import stopped because Prices-GR did not pass validation.'
+                );
             }
-            try {
-                $this->process_item($item, $images_map, $series_map, $features_map, $item_features_map, $item_attributes_map, $prices_map);
-                $processed++;
-                $updated_skus[] = $check['key'];
-                $this->update_hash_map_entry($hash_map, $check['key'], $check['hash']);
-            } catch (Exception $e) {
-                $this->log("Exception processing item (offset" . ($offset + $processed) . "): " . $e->getMessage());
+
+            // Fetch the items feed.
+            $xml = $this->fetch_url_xml($this->feeds['items']);
+            if (!$xml) {
+                $this->log('Failed fetching Items feed');
+                throw new RuntimeException('Import stopped because Items could not be loaded.');
             }
-        }
-        $this->save_hash_map($hash_map);
 
-        if ($skipped > 0) {
-            $sku_list = !empty($updated_skus) ? 'updated SKU: ' . implode(', ', $updated_skus) : '';
-            $this->log("Skipped {$skipped} unchanged items" . ($sku_list ? ", {$sku_list}" : ''));
-        }
+            $items_arr = [];
+            $item_indexes = [];
+            $duplicate_items = 0;
+            $normalized_item_codes = 0;
+            $invalid_item_codes = 0;
+            $conflicting_items = [];
 
-        // After the foreach ($slice as $item) loop, add:
-        $seen_skus = $this->load_seen_skus();
-        foreach ($slice as $item) {
-            $sku = trim((string) $item->Code);
-            if ($sku) $seen_skus[] = $sku;
-        }
-        $this->save_seen_skus($seen_skus);
+            foreach ($xml->Item as $it) {
+                $raw_code = (string) $it->Code;
+                $code = $this->normalize_sku($raw_code);
+                if ($raw_code !== $code) {
+                    $normalized_item_codes++;
+                }
+                if ($code === '') {
+                    $invalid_item_codes++;
+                    continue;
+                }
 
-        // advance pointer; if we reached the end, reset to 0 so next run can cycle
-        $new_offset = $offset + $processed;
-        if ($new_offset >= count($items_arr)) {
-            update_option('plano_import_offset', 0, false);
-            $this->log("Processed {$processed} items and reached feed and -> pointer reset to 0.");
-            
-            // Run deletion reconciliation
+                if (isset($item_indexes[$code])) {
+                    $duplicate_items++;
+                    $existing_item = $items_arr[$item_indexes[$code]];
+                    if ($this->canonical_json($existing_item) !== $this->canonical_json($it)) {
+                        $conflicting_items[] = $code;
+                    }
+                    continue;
+                }
+
+                $item_indexes[$code] = count($items_arr);
+                $items_arr[] = $it;
+            }
+
+            $items_created_at = isset($xml['createdAt']) ? (string) $xml['createdAt'] : 'unknown';
+            $this->log(
+                'Items loaded: rows=' . count($xml->Item)
+                . ', unique=' . count($items_arr)
+                . ", duplicates={$duplicate_items}, normalized_skus={$normalized_item_codes}, "
+                . "invalid_skus={$invalid_item_codes}, created_at={$items_created_at}"
+            );
+
+            if ($invalid_item_codes > 0 || !empty($conflicting_items)) {
+                $sample = implode(', ', array_slice(array_unique($conflicting_items), 0, 10));
+                $this->log(
+                    "Import stopped: invalid_item_skus={$invalid_item_codes}, "
+                    . 'conflicting_duplicate_skus=' . count(array_unique($conflicting_items))
+                    . ($sample !== '' ? ". Sample: {$sample}" : '')
+                );
+                throw new RuntimeException(
+                    'Import stopped because Items contains invalid or conflicting SKUs.'
+                );
+            }
+
+            if (empty($items_arr)) {
+                $this->log('Import stopped: the validated Items feed is empty.');
+                throw new RuntimeException('Import stopped because Items is empty.');
+            }
+
+            $missing_prices = [];
+            foreach ($items_arr as $item) {
+                $sku = $this->normalize_sku($item->Code);
+                if (!isset($prices_map[$sku])) {
+                    $missing_prices[] = $sku;
+                }
+            }
+
+            if (!empty($missing_prices)) {
+                $sample = implode(', ', array_slice($missing_prices, 0, 10));
+                $this->log(
+                    'Import stopped: Prices-GR has no valid price for '
+                    . count($missing_prices) . " Items SKUs. Sample: {$sample}"
+                );
+                throw new RuntimeException(
+                    'Import stopped because Prices-GR does not cover every Items SKU.'
+                );
+            }
+
+            $orphan_price_count = count(array_diff_key($prices_map, $item_indexes));
+            if ($orphan_price_count > 0) {
+                $this->log("Prices-GR contains {$orphan_price_count} SKUs that are not in Items.");
+            }
+
+            if ($offset >= count($items_arr)) {
+                update_option('plano_import_offset', 0, false);
+                $this->log("Pointer was at/after end ({$offset}). Reset to 0.");
+                return 0;
+            }
+
+            $hash_map = $this->load_hash_map();
+            $slice = array_slice($items_arr, $offset, $batch);
+            $consumed = count($slice);
+            $processed = 0;
+            $skipped = 0;
+            $failed = 0;
+            $updated_skus = [];
+
+            foreach ($slice as $slice_index => $item) {
+                $check = $this->check_item_changed($item, $hash_map, 'Code', $prices_map);
+                if (!$check['changed']) {
+                    $expected_price = $prices_map[$check['key']];
+                    if ($this->stored_product_price_is_synced($check['key'], $expected_price)) {
+                        $skipped++;
+                        $processed++;
+                        continue;
+                    }
+                    $this->log(
+                        "Price repair required for SKU={$check['key']}: "
+                        . 'feed hash matched, but WooCommerce did not match Prices-GR.'
+                    );
+                }
+
+                try {
+                    $product_id = $this->process_item(
+                        $item,
+                        $images_map,
+                        $series_map,
+                        $features_map,
+                        $item_features_map,
+                        $item_attributes_map,
+                        $prices_map
+                    );
+                    if (!$product_id) {
+                        $failed++;
+                        continue;
+                    }
+
+                    $processed++;
+                    $updated_skus[] = $check['key'];
+                    $this->update_hash_map_entry($hash_map, $check['key'], $check['hash']);
+                } catch (Throwable $e) {
+                    $failed++;
+                    $item_offset = $offset + $slice_index;
+                    $error_type = get_class($e);
+                    $this->log(
+                        "Failed item SKU={$check['key']} at offset {$item_offset}: "
+                        . "{$error_type}: {$e->getMessage()}"
+                    );
+                }
+            }
+            if (!$this->save_hash_map($hash_map)) {
+                $this->log('Warning: the item hash map could not be saved.');
+            }
+
+            if ($skipped > 0) {
+                $sku_list = !empty($updated_skus) ? 'updated SKU: ' . implode(', ', $updated_skus) : '';
+                $this->log("Skipped {$skipped} unchanged items" . ($sku_list ? ", {$sku_list}" : ''));
+            }
+            if ($failed > 0) {
+                $this->log("Batch had {$failed} failed items. Their hashes were not saved.");
+            }
+
             $seen_skus = $this->load_seen_skus();
-            $this->reconcile_deletions($seen_skus);
+            foreach ($slice as $item) {
+                $sku = $this->normalize_sku($item->Code);
+                if ($sku) $seen_skus[] = $sku;
+            }
+            $this->save_seen_skus($seen_skus);
 
-            // Clear seen SKUs for next cycle
-            $this->save_seen_skus([]);
-        } else {
-            update_option('plano_import_offset', $new_offset, false);
-            $this->log("Batch finished: processed={$processed}, pointer set to {$new_offset}");
+            // Always advance by the number of feed rows in this slice.
+            $new_offset = $offset + $consumed;
+            if ($new_offset >= count($items_arr)) {
+                update_option('plano_import_offset', 0, false);
+                $this->log(
+                    "Consumed {$consumed} feed items, processed {$processed}, "
+                    . "and reached the feed end. Pointer reset to 0."
+                );
+
+                $seen_skus = $this->load_seen_skus();
+                $this->reconcile_deletions($seen_skus);
+                $this->save_seen_skus([]);
+            } else {
+                update_option('plano_import_offset', $new_offset, false);
+                $this->log(
+                    "Batch finished: consumed={$consumed}, processed={$processed}, "
+                    . "failed={$failed}, pointer={$new_offset}"
+                );
+            }
+
+            return $processed;
+        } finally {
+            delete_transient('plano_import_lock');
         }
-
-        delete_transient('plano_import_lock');
-        return $processed;
     }
 
     public function process_item(
@@ -403,25 +700,39 @@ class Plano_Importer_Core
         $item_features_map = [], 
         $item_attributes_map = [],
         $prices_map = []
-    ) {
+    ): int {
         if (!function_exists('wc_get_product_id_by_sku')) {
             $this->log('WooCommerce functions not available. Aborting item processing.');
-            return;
+            return 0;
         }
 
-        $code = trim((string) $item_xml->Code);
-        if (empty($code)) {
+        $code = $this->normalize_sku($item_xml->Code);
+        if ($code === '') {
             $this->log('Item with empty Code skipped');
-            return;
+            return 0;
         }
+
+        if (!isset($prices_map[$code])) {
+            $this->log("Item skipped: Prices-GR has no validated price for SKU={$code}");
+            return 0;
+        }
+
+        $price_data = $prices_map[$code];
         $sku = $code;
         $existing_id = wc_get_product_id_by_sku($sku);
         if ($existing_id) {
             $product = wc_get_product($existing_id);
             if (!$product) {
-                // fallback create new
-                $product = new WC_Product_Simple();
-                $product->set_sku($sku);
+                $this->log("Product lookup failed for SKU={$sku} (ID={$existing_id}). Item skipped.");
+                return 0;
+            }
+            if (!$product->is_type('simple')) {
+                $product_type = $product->get_type();
+                $this->log(
+                    "Product type mismatch for SKU={$sku} (ID={$existing_id}): "
+                    . "expected=simple, actual={$product_type}. Item skipped."
+                );
+                return 0;
             }
             $this->log("Updating product SKU={$sku} (ID={$existing_id})");
         } else {
@@ -437,14 +748,15 @@ class Plano_Importer_Core
         $product->set_name($name);
         $product->set_slug($slug);
 
-        if (isset($prices_map[$code])) {
-            $p = $prices_map[$code];
-            $product->set_regular_price($p['price_with_vat']);
-            if ($p['sale_price'] !== null) {
-                $product->set_sale_price($p['sale_price']);
-            } else {
-                $product->set_sale_price('');
-            }
+        $product->set_regular_price($price_data['price_with_vat']);
+        $product->set_date_on_sale_from(null);
+        $product->set_date_on_sale_to(null);
+        if ($price_data['sale_price'] !== null) {
+            $product->set_sale_price($price_data['sale_price']);
+            $product->set_price($price_data['sale_price']);
+        } else {
+            $product->set_sale_price('');
+            $product->set_price($price_data['price_with_vat']);
         }
 
         $product->set_description($desc);
@@ -690,8 +1002,28 @@ class Plano_Importer_Core
         $product_id = $product->save();
         if (!$product_id) {
             $this->log("Failed saving product SKU={$sku}");
+            return 0;
         } else {
-            $this->log("Saved product SKU={$sku} ID={$product_id}");
+            if (function_exists('clean_post_cache')) {
+                clean_post_cache($product_id);
+            }
+            $saved_product = function_exists('wc_get_product')
+                ? wc_get_product($product_id)
+                : $product;
+
+            if (!$this->product_has_expected_price($saved_product, $price_data)) {
+                $this->log(
+                    "Failed verifying saved price for SKU={$sku} ID={$product_id}; "
+                    . 'the item hash will not be updated.'
+                );
+                return 0;
+            }
+
+            $sale_log = $price_data['sale_price'] === null ? 'none' : $price_data['sale_price'];
+            $this->log(
+                "Saved product SKU={$sku} ID={$product_id}, "
+                . "regular_price={$price_data['price_with_vat']}, sale_price={$sale_log}"
+            );
             update_post_meta($product_id, '_plano_imported', 1);
             // ensure categories (if we assigned earlier with product id 0)
             if (isset($term_ids) && !empty($term_ids))
@@ -700,6 +1032,7 @@ class Plano_Importer_Core
             if (!empty($brand_term_ids) && !empty($product_id))
                 wp_set_object_terms($product_id, $brand_term_ids, 'product_brand', false);
         }
+        return intval($product_id);
     }
 
     private function sideload_image_to_media($image_url)
@@ -843,7 +1176,17 @@ class Plano_Importer_Core
         if ($json === false)
             return [];
         $data = json_decode($json, true);
-        return is_array($data) ? $data : [];
+        if (!is_array($data))
+            return [];
+
+        $normalized = [];
+        foreach ($data as $sku => $hash) {
+            $sku = $this->normalize_sku($sku);
+            if ($sku !== '' && is_string($hash)) {
+                $normalized[$sku] = $hash;
+            }
+        }
+        return $normalized;
     }
 
     /**
@@ -927,12 +1270,12 @@ class Plano_Importer_Core
      */
     private function compute_item_hash(mixed $item, $price_data = null, string $algo = 'sha256'): string
     {
-        $json = $this->canonical_json($item);
+        $json = 'schema=' . self::HASH_SCHEMA_VERSION . "\x00" . $this->canonical_json($item);
         if ($price_data !== null) {
             $price_json = $this->canonical_json($price_data);
             $json .= "\x00" . $price_json;
         }
-        return hash($algo, $json);
+        return 'v' . self::HASH_SCHEMA_VERSION . ':' . hash($algo, $json);
     }
 
     /**
@@ -954,6 +1297,7 @@ class Plano_Importer_Core
             if (isset($item_xml->Code))
                 $key = (string) $item_xml->Code;
         }
+        $key = $this->normalize_sku($key);
         
         // Get price data for this SKU if available
         $price_data = isset($prices_map[$key]) ? $prices_map[$key] : null;
@@ -975,7 +1319,7 @@ class Plano_Importer_Core
 }
 class WP_Woo_Plano_Importer
 {
-    private $core;
+    public $core;
 
     private $option_name = 'plano_importer_opts';
 
@@ -985,6 +1329,7 @@ class WP_Woo_Plano_Importer
         'images_url' => '',
         'attributes_url' => '',
         'features_url' => '',
+        'prices_url' => '',
         'batch' => 10,
         'cron_batch' => 50,
     ];
@@ -1001,6 +1346,7 @@ class WP_Woo_Plano_Importer
         $feeds['images'] = $opts['images_url'] ?: '';
         $feeds['attributes'] = $opts['attributes_url'] ?: '';
         $feeds['features'] = $opts['features_url'] ?: '';
+        $feeds['prices-gr'] = $opts['prices_url'] ?: '';
 
         // if any feed missing, let core use defaults
         foreach ($feeds as $k => $v) {
@@ -1040,6 +1386,11 @@ class WP_Woo_Plano_Importer
         ?>
         <div class="wrap">
             <h1>Plano Importer</h1>
+            <?php if (isset($_GET['plano_imported']) && sanitize_key(wp_unslash($_GET['plano_imported'])) === 'failed'): ?>
+                <div class="notice notice-error">
+                    <p>The import stopped. Review the importer log below.</p>
+                </div>
+            <?php endif; ?>
             <form method="post" action="<?php echo esc_url(
                 admin_url('admin-post.php')
             ); ?>">
@@ -1069,6 +1420,11 @@ class WP_Woo_Plano_Importer
                     <tr>
                         <th>Features feed URL</th>
                         <td><input type="text" name="features_url" value="<?php echo esc_attr($opts['features_url']); ?>"
+                                size="80" /></td>
+                    </tr>
+                    <tr>
+                        <th>Prices-GR feed URL</th>
+                        <td><input type="text" name="prices_url" value="<?php echo esc_attr($opts['prices_url']); ?>"
                                 size="80" /></td>
                     </tr>
                     <tr>
@@ -1122,7 +1478,16 @@ class WP_Woo_Plano_Importer
 
         // save posted URLs / settings if present
         $posted = false;
-        $fields = ['items_url', 'series_url', 'images_url', 'attributes_url', 'features_url', 'batch', 'cron_batch'];
+        $fields = [
+            'items_url',
+            'series_url',
+            'images_url',
+            'attributes_url',
+            'features_url',
+            'prices_url',
+            'batch',
+            'cron_batch'
+        ];
         foreach ($fields as $f) {
             if (isset($_POST[$f])) {
                 $opts[$f] = sanitize_text_field(wp_unslash($_POST[$f]));
@@ -1132,22 +1497,29 @@ class WP_Woo_Plano_Importer
         if ($posted)
             update_option($this->option_name, $opts);
 
-        // If reset_pointer checkbox is set, perform ONLY the reset and do NOT run the import
+        // Reset first, then run the requested batch from the start.
         if (isset($_POST['reset_pointer']) && $_POST['reset_pointer']) {
             $this->core->reset_pointer();
-            $redirect = add_query_arg('plano_imported', 'reset', wp_get_referer() ?: admin_url('tools.php?page=plano-importer'));
-            wp_safe_redirect($redirect);
-            exit;
         }
 
-        $batch = isset($_POST['']) ? intval($_POST['batch']) : intval($opts['batch']);
+        $batch = isset($_POST['batch']) ? intval($_POST['batch']) : intval($opts['batch']);
         if ($batch < 1)
             $batch = 10;
 
-        $processed = $this->core->do_import_batch($batch);
+        $result = 'processed';
+        try {
+            $this->core->do_import_batch($batch);
+        } catch (Throwable $e) {
+            $result = 'failed';
+            $this->core->log('Manual import failed: ' . $e->getMessage());
+        }
 
         // redirect back with notice
-        $redirect = add_query_arg('plano_imported', 'processed', wp_get_referer() ?: admin_url('tools.php?page=plano-importer'));
+        $redirect = add_query_arg(
+            'plano_imported',
+            $result,
+            wp_get_referer() ?: admin_url('tools.php?page=plano-importer')
+        );
         wp_safe_redirect($redirect);
         exit;
     }
